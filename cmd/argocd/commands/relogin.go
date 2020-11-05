@@ -20,8 +20,8 @@ import (
 // NewReloginCommand returns a new instance of `argocd relogin` command
 func NewReloginCommand(globalClientOpts *argocdclient.ClientOptions) *cobra.Command {
 	var (
-		password string
-		ssoPort  int
+		password  string
+		ssoParams ssoParams
 	)
 	var command = &cobra.Command{
 		Use:   "relogin",
@@ -68,7 +68,7 @@ func NewReloginCommand(globalClientOpts *argocdclient.ClientOptions) *cobra.Comm
 				errors.CheckError(err)
 				oauth2conf, provider, err := acdClient.OIDCConfig(ctx, acdSet)
 				errors.CheckError(err)
-				tokenString, refreshToken = oauth2Login(ctx, ssoPort, acdSet.GetOIDCConfig(), oauth2conf, provider)
+				tokenString, refreshToken = oauth2Login(ctx, ssoParams, acdSet.GetOIDCConfig(), oauth2conf, provider)
 			}
 
 			localCfg.UpsertUser(localconfig.User{
@@ -82,6 +82,8 @@ func NewReloginCommand(globalClientOpts *argocdclient.ClientOptions) *cobra.Comm
 		},
 	}
 	command.Flags().StringVar(&password, "password", "", "the password of an account to authenticate")
-	command.Flags().IntVar(&ssoPort, "sso-port", DefaultSSOLocalPort, "port to run local OAuth2 login application")
+	command.Flags().IntVar(&ssoParams.port, "sso-port", DefaultSSOLocalPort, "port to run local OAuth2 login application")
+	command.Flags().StringVar(&ssoParams.keyFile, "sso-local-server-cert", "", "local webserver certificate")
+	command.Flags().StringVar(&ssoParams.certFile, "sso-local-server-key", "", "local webserver key")
 	return command
 }

@@ -30,14 +30,21 @@ import (
 	"github.com/argoproj/argo-cd/util/rand"
 )
 
+type ssoParams struct {
+	port     int
+	certFile string
+	keyFile  string
+	clientSecret string
+}
+
 // NewLoginCommand returns a new instance of `argocd login` command
 func NewLoginCommand(globalClientOpts *argocdclient.ClientOptions) *cobra.Command {
 	var (
-		ctxName  string
-		username string
-		password string
-		sso      bool
-		ssoPort  int
+		ctxName   string
+		username  string
+		password  string
+		sso       bool
+		ssoParams ssoParams
 	)
 	var command = &cobra.Command{
 		Use:   "login SERVER",
@@ -109,7 +116,7 @@ func NewLoginCommand(globalClientOpts *argocdclient.ClientOptions) *cobra.Comman
 				errors.CheckError(err)
 				oauth2conf, provider, err := acdClient.OIDCConfig(ctx, acdSet)
 				errors.CheckError(err)
-				tokenString, refreshToken = oauth2Login(ctx, ssoPort, acdSet.GetOIDCConfig(), oauth2conf, provider)
+				tokenString, refreshToken = oauth2Login(ctx, ssoParams, acdSet.GetOIDCConfig(), oauth2conf, provider)
 			}
 
 			parser := &jwt.Parser{
@@ -156,7 +163,10 @@ func NewLoginCommand(globalClientOpts *argocdclient.ClientOptions) *cobra.Comman
 	command.Flags().StringVar(&username, "username", "", "the username of an account to authenticate")
 	command.Flags().StringVar(&password, "password", "", "the password of an account to authenticate")
 	command.Flags().BoolVar(&sso, "sso", false, "perform SSO login")
-	command.Flags().IntVar(&ssoPort, "sso-port", DefaultSSOLocalPort, "port to run local OAuth2 login application")
+	command.Flags().IntVar(&ssoParams.port, "sso-port", DefaultSSOLocalPort, "port to run local OAuth2 login application")
+	command.Flags().StringVar(&ssoParams.certFile, "sso-local-server-cert", "", "local webserver certificate")
+	command.Flags().StringVar(&ssoParams.keyFile, "sso-local-server-key", "", "local webserver key")
+	command.Flags().StringVar(&ssoParams.clientSecret, "sso-client-secret", "", "client secret")
 	return command
 }
 
@@ -172,8 +182,12 @@ func userDisplayName(claims jwt.MapClaims) string {
 
 // oauth2Login opens a browser, runs a temporary HTTP server to delegate OAuth2 login flow and
 // returns the JWT token and a refresh token (if supported)
-func oauth2Login(ctx context.Context, port int, oidcSettings *settingspkg.OIDCConfig, oauth2conf *oauth2.Config, provider *oidc.Provider) (string, string) {
-	oauth2conf.RedirectURL = fmt.Sprintf("http://localhost:%d/auth/callback", port)
+func oauth2Login(ctx context.Context, ssoParams ssoParams, oidcSettings *settingspkg.OIDCConfig, oauth2conf *oauth2.Config, provider *oidc.Provider) (string, string) {
+	method := "http"
+	if ssoParams.certFile != "" {
+		method = "https"
+	}
+	oauth2conf.RedirectURL = fmt.Sprintf("%s://localhost:%d/auth/callback", method, ssoParams.port)
 	oidcConf, err := oidcutil.ParseConfig(provider)
 	errors.CheckError(err)
 	log.Debug("OIDC Configuration:")
@@ -238,7 +252,9 @@ func oauth2Login(ctx context.Context, port int, oidcSettings *settingspkg.OIDCCo
 				handleErr(w, fmt.Sprintf("no code in request: %q", r.Form))
 				return
 			}
+			oauth2conf.ClientSecret = ssoParams.clientSecret
 			opts := []oauth2.AuthCodeOption{oauth2.SetAuthURLParam("code_verifier", codeVerifier)}
+			log.Debugf("oauth2conf: %v", oauth2conf)
 			tok, err := oauth2conf.Exchange(ctx, code, opts...)
 			if err != nil {
 				handleErr(w, err.Error())
@@ -260,7 +276,7 @@ func oauth2Login(ctx context.Context, port int, oidcSettings *settingspkg.OIDCCo
 		fmt.Fprint(w, successPage)
 		completionChan <- ""
 	}
-	srv := &http.Server{Addr: "localhost:" + strconv.Itoa(port)}
+	srv := &http.Server{Addr: "localhost:" + strconv.Itoa(ssoParams.port)}
 	http.HandleFunc("/auth/callback", callbackHandler)
 
 	// Redirect user to login & consent page to ask for permission for the scopes specified above.
@@ -289,7 +305,13 @@ func oauth2Login(ctx context.Context, port int, oidcSettings *settingspkg.OIDCCo
 	errors.CheckError(err)
 	go func() {
 		log.Debugf("Listen: %s", srv.Addr)
-		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		var err error
+		if ssoParams.certFile != "" {
+			err = srv.ListenAndServeTLS(ssoParams.certFile, ssoParams.keyFile)
+		} else {
+			err = srv.ListenAndServe()
+		}
+		if err != http.ErrServerClosed {
 			log.Fatalf("Temporary HTTP server failed: %s", err)
 		}
 	}()
